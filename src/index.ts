@@ -713,9 +713,25 @@ async function main(): Promise<void> {
     },
   });
   startIpcWatcher({
-    sendMessage: (jid, text) => {
+    sendMessage: async (jid, text, filePath) => {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
+      if (filePath && channel.sendFile) {
+        try {
+          await channel.sendFile(jid, filePath, text);
+          return;
+        } catch (err) {
+          logger.error(
+            { jid, filePath, err },
+            'sendFile failed, falling back to text-only',
+          );
+        }
+      } else if (filePath) {
+        logger.warn(
+          { jid, channel: channel.name },
+          'Channel does not support sendFile, file dropped',
+        );
+      }
       return channel.sendMessage(jid, text);
     },
     registeredGroups: () => registeredGroups,

@@ -41,9 +41,15 @@ const server = new McpServer({
 
 server.tool(
   'send_message',
-  "Send a message to the user or group immediately while you're still running. Use this for progress updates or to send multiple messages. You can call this multiple times.",
+  "Send a message to the user or group immediately while you're still running. Use this for progress updates or to send multiple messages. You can call this multiple times. Optionally attach a file from /workspace/group/.",
   {
     text: z.string().describe('The message text to send'),
+    file_path: z
+      .string()
+      .optional()
+      .describe(
+        'Optional file to attach. Must be an absolute path inside /workspace/group/ (e.g., /workspace/group/report.pdf)',
+      ),
     sender: z
       .string()
       .optional()
@@ -52,10 +58,34 @@ server.tool(
       ),
   },
   async (args) => {
+    if (args.file_path && !args.file_path.startsWith('/workspace/group/')) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: 'Error: file_path must be inside /workspace/group/ (e.g., /workspace/group/report.pdf)',
+          },
+        ],
+        isError: true,
+      };
+    }
+    if (args.file_path === '/workspace/group/') {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: 'Error: file_path must include a filename (e.g., /workspace/group/report.pdf)',
+          },
+        ],
+        isError: true,
+      };
+    }
+
     const data: Record<string, string | undefined> = {
       type: 'message',
       chatJid,
       text: args.text,
+      filePath: args.file_path || undefined,
       sender: args.sender || undefined,
       groupFolder,
       timestamp: new Date().toISOString(),
@@ -63,7 +93,12 @@ server.tool(
 
     writeIpcFile(MESSAGES_DIR, data);
 
-    return { content: [{ type: 'text' as const, text: 'Message sent.' }] };
+    const fileNote = args.file_path
+      ? ' (file attached)'
+      : '';
+    return {
+      content: [{ type: 'text' as const, text: `Message sent${fileNote}.` }],
+    };
   },
 );
 
