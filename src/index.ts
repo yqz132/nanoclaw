@@ -5,6 +5,7 @@ import { OneCLI } from '@onecli-sh/sdk';
 
 import {
   ASSISTANT_NAME,
+  DATA_DIR,
   DEFAULT_TRIGGER,
   getTriggerPattern,
   GROUPS_DIR,
@@ -343,7 +344,36 @@ async function runAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
-  const sessionId = sessions[group.folder];
+  let sessionId: string | undefined = sessions[group.folder];
+
+  // Third-party API proxies (e.g. Xunfei) often don't support the full
+  // message format that Claude sessions produce, causing 400 errors on
+  // session resume. Skip session restore for non-Anthropic endpoints.
+  if (sessionId) {
+    try {
+      const settingsPath = path.join(
+        DATA_DIR,
+        'sessions',
+        group.folder,
+        '.claude',
+        'settings.json',
+      );
+      const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      const baseUrl = settings?.env?.ANTHROPIC_BASE_URL;
+      if (baseUrl) {
+        const hostname = new URL(baseUrl).hostname;
+        if (!hostname.endsWith('.anthropic.com')) {
+          logger.info(
+            { group: group.name, hostname },
+            'Non-Anthropic API detected — skipping session restore',
+          );
+          sessionId = undefined;
+        }
+      }
+    } catch {
+      // settings.json may not exist or be malformed — use session as normal
+    }
+  }
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
