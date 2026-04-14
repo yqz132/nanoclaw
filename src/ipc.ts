@@ -6,12 +6,12 @@ import { CronExpressionParser } from 'cron-parser';
 import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
-import { isValidGroupFolder } from './group-folder.js';
+import { isValidGroupFolder, resolveGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
-  sendMessage: (jid: string, text: string) => Promise<void>;
+  sendMessage: (jid: string, text: string, filePath?: string) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroups: (force: boolean) => Promise<void>;
@@ -81,9 +81,18 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   isMain ||
                   (targetGroup && targetGroup.folder === sourceGroup)
                 ) {
-                  await deps.sendMessage(data.chatJid, data.text);
+                  const resolvedFilePath = resolveContainerFilePath(
+                    data.filePath,
+                    sourceGroup,
+                  );
+
+                  await deps.sendMessage(
+                    data.chatJid,
+                    data.text,
+                    resolvedFilePath,
+                  );
                   logger.info(
-                    { chatJid: data.chatJid, sourceGroup },
+                    { chatJid: data.chatJid, sourceGroup, resolvedFilePath },
                     'IPC message sent',
                   );
                 } else {
@@ -465,4 +474,54 @@ export async function processTaskIpc(
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');
   }
+}
+
+/**
+ * Resolve a container-side file path (e.g. /workspace/group/report.pdf)
+ * to a host-side absolute path. Returns undefined if the path is invalid
+ * (outside /workspace/group, bare directory, or traversal attempt).
+ * Invalid paths are logged but do NOT prevent the text portion of the
+ * message from being delivered.
+ */
+function resolveContainerFilePath(
+  containerPath: string | undefined,
+  sourceGroup: string,
+): string | undefined {
+  if (!containerPath) return undefined;
+
+  const containerGroupPrefix = '/workspace/group/';
+
+  // Must start with /workspace/group/ and have a filename after it
+  if (!containerPath.startsWith(containerGroupPrefix)) {
+    logger.warn(
+      { filePath: containerPath, sourceGroup },
+      'IPC file path outside /workspace/group/ — file dropped, text sent',
+    );
+    return undefined;
+  }
+
+  const relativePart = containerPath.slice(containerGroupPrefix.length);
+  if (!relativePart) {
+    logger.warn(
+      { filePath: containerPath, sourceGroup },
+      'IPC file path is bare /workspace/group/ — file dropped, text sent',
+    );
+    return undefined;
+  }
+
+  const groupDir = resolveGroupFolderPath(sourceGroup);
+  const hostFilePath = path.join(groupDir, relativePart);
+
+  // Security: resolved path must stay within the group folder
+  const resolvedPath = path.resolve(hostFilePath);
+  const resolvedGroupDir = path.resolve(groupDir);
+  if (!resolvedPath.startsWith(resolvedGroupDir + path.sep)) {
+    logger.warn(
+      { resolvedPath, resolvedGroupDir, sourceGroup },
+      'IPC file path traversal attempt blocked — file dropped, text sent',
+    );
+    return undefined;
+  }
+
+  return resolvedPath;
 }

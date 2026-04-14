@@ -1,4 +1,8 @@
+import fs from 'fs';
+import path from 'path';
+
 import {
+  AttachmentBuilder,
   Client,
   Events,
   GatewayIntentBits,
@@ -190,22 +194,27 @@ export class DiscordChannel implements Channel {
     });
   }
 
-  async sendMessage(jid: string, text: string): Promise<void> {
+  private async getTextChannel(jid: string): Promise<TextChannel | null> {
     if (!this.client) {
       logger.warn('Discord client not initialized');
-      return;
+      return null;
     }
 
+    const channelId = jid.replace(/^dc:/, '');
+    const channel = await this.client.channels.fetch(channelId);
+
+    if (!channel || !('send' in channel)) {
+      logger.warn({ jid }, 'Discord channel not found or not text-based');
+      return null;
+    }
+
+    return channel as TextChannel;
+  }
+
+  async sendMessage(jid: string, text: string): Promise<void> {
     try {
-      const channelId = jid.replace(/^dc:/, '');
-      const channel = await this.client.channels.fetch(channelId);
-
-      if (!channel || !('send' in channel)) {
-        logger.warn({ jid }, 'Discord channel not found or not text-based');
-        return;
-      }
-
-      const textChannel = channel as TextChannel;
+      const textChannel = await this.getTextChannel(jid);
+      if (!textChannel) return;
 
       // Discord has a 2000 character limit per message — split if needed
       const MAX_LENGTH = 2000;
@@ -219,6 +228,35 @@ export class DiscordChannel implements Channel {
       logger.info({ jid, length: text.length }, 'Discord message sent');
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send Discord message');
+    }
+  }
+
+  async sendFile(
+    jid: string,
+    filePath: string,
+    caption?: string,
+  ): Promise<void> {
+    try {
+      const textChannel = await this.getTextChannel(jid);
+      if (!textChannel) return;
+
+      try {
+        await fs.promises.access(filePath);
+      } catch {
+        logger.warn({ jid, filePath }, 'File not found, cannot send');
+        return;
+      }
+
+      const attachment = new AttachmentBuilder(filePath, {
+        name: path.basename(filePath),
+      });
+      await textChannel.send({
+        content: caption || undefined,
+        files: [attachment],
+      });
+      logger.info({ jid, filePath }, 'Discord file sent');
+    } catch (err) {
+      logger.error({ jid, filePath, err }, 'Failed to send Discord file');
     }
   }
 
