@@ -20,11 +20,7 @@ import {
   STORE_DIR,
   TIMEZONE,
 } from './config.js';
-import {
-  resolveGroupFolderPath,
-  resolveGroupIpcPath,
-  isValidGroupFolder,
-} from './group-folder.js';
+import { resolveGroupFolderPath, resolveGroupIpcPath, isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import {
   CONTAINER_RUNTIME_BIN,

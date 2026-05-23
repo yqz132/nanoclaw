@@ -4,7 +4,8 @@ node_modules/
 # Build output
 dist/
 
-# Local data & auth
+# Local data & auth (per-agent)
+agents/
 store/
 data/
 logs/

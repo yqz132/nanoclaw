@@ -5,6 +5,7 @@ import { OneCLI } from '@onecli-sh/sdk';
 
 import {
   ASSISTANT_NAME,
+  DATA_DIR,
   DEFAULT_TRIGGER,
   getTriggerPattern,
   GROUPS_DIR,
@@ -82,8 +83,8 @@ const onecli = new OneCLI({ url: ONECLI_URL });
 
 function ensureOneCLIAgent(jid: string, group: RegisteredGroup): void {
   if (group.isMain) return;
-  const identifier = group.folder.toLowerCase().replace(/_/g, '-');
-  onecli.ensureAgent({ name: group.name, identifier }).then(
+  const identifier = ASSISTANT_NAME.toLowerCase().replace(/_/g, '-');
+  onecli.ensureAgent({ name: ASSISTANT_NAME, identifier }).then(
     (res) => {
       logger.info(
         { jid, identifier, created: res.created },
@@ -157,13 +158,16 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
   registeredGroups[jid] = group;
   setRegisteredGroup(jid, group);
 
-  // Create group folder
+  // Create group folder (for workspace files, not identity)
   fs.mkdirSync(path.join(groupDir, 'logs'), { recursive: true });
 
-  // Copy CLAUDE.md template into the new group folder so agents have
-  // identity and instructions from the first run.  (Fixes #1391)
-  const groupMdFile = path.join(groupDir, 'CLAUDE.md');
-  if (!fs.existsSync(groupMdFile)) {
+  // Write CLAUDE.md into the per-group .claude/ directory (mounted at
+  // /home/node/.claude/ in the container) so agent identity is isolated
+  // from the shared workspace. Project groups share a group folder but
+  // each agent instance has its own .claude/ with its own persona.
+  const claudeDir = path.join(DATA_DIR, 'sessions', group.folder, '.claude');
+  const claudeMdFile = path.join(claudeDir, 'CLAUDE.md');
+  if (!fs.existsSync(claudeMdFile)) {
     const templateFile = path.join(
       GROUPS_DIR,
       group.isMain ? 'main' : 'global',
@@ -175,8 +179,9 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
         content = content.replace(/^# Andy$/m, `# ${ASSISTANT_NAME}`);
         content = content.replace(/You are Andy/g, `You are ${ASSISTANT_NAME}`);
       }
-      fs.writeFileSync(groupMdFile, content);
-      logger.info({ folder: group.folder }, 'Created CLAUDE.md from template');
+      fs.mkdirSync(claudeDir, { recursive: true });
+      fs.writeFileSync(claudeMdFile, content);
+      logger.info({ folder: group.folder }, 'Created CLAUDE.md in .claude/');
     }
   }
 
@@ -239,14 +244,16 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   if (missedMessages.length === 0) return true;
 
-  // For non-main groups, check if trigger is required and present
+  // For non-main groups, check if trigger is required and present.
+  // (getMessagesSince already filters is_from_me=0, so no self-trigger
+  // loop is possible here.)
   if (!isMainGroup && group.requiresTrigger !== false) {
     const triggerPattern = getTriggerPattern(group.trigger);
     const allowlistCfg = loadSenderAllowlist();
     const hasTrigger = missedMessages.some(
       (m) =>
         triggerPattern.test(m.content.trim()) &&
-        (m.is_from_me || isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
+        isTriggerAllowed(chatJid, m.sender, allowlistCfg),
     );
     if (!hasTrigger) return true;
   }
@@ -485,19 +492,18 @@ async function startMessageLoop(): Promise<void> {
           }
 
           const isMainGroup = group.isMain === true;
-          const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
 
           // For non-main groups, only act on trigger messages.
-          // Non-trigger messages accumulate in DB and get pulled as
-          // context when a trigger eventually arrives.
-          if (needsTrigger) {
+          // Non-trigger messages accumulate in DB as context.
+          // (getNewMessages already filters is_from_me=0, so no
+          // self-trigger loop is possible here.)
+          if (!isMainGroup && group.requiresTrigger !== false) {
             const triggerPattern = getTriggerPattern(group.trigger);
             const allowlistCfg = loadSenderAllowlist();
             const hasTrigger = groupMessages.some(
               (m) =>
                 triggerPattern.test(m.content.trim()) &&
-                (m.is_from_me ||
-                  isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
+                isTriggerAllowed(chatJid, m.sender, allowlistCfg),
             );
             if (!hasTrigger) continue;
           }

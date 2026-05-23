@@ -89,10 +89,11 @@ describe('storeMessage', () => {
     expect(messages).toHaveLength(0);
   });
 
-  it('stores is_from_me flag', () => {
+  it('excludes own bot messages via is_from_me flag', () => {
     storeChatMetadata('group@g.us', '2024-01-01T00:00:00.000Z');
 
-    store({
+    // Own bot message — should be filtered by is_from_me = 0
+    storeMessage({
       id: 'msg-3',
       chat_jid: 'group@g.us',
       sender: 'me@s.whatsapp.net',
@@ -102,13 +103,12 @@ describe('storeMessage', () => {
       is_from_me: true,
     });
 
-    // Message is stored (we can retrieve it — is_from_me doesn't affect retrieval)
     const messages = getMessagesSince(
       'group@g.us',
       '2024-01-01T00:00:00.000Z',
       'Andy',
     );
-    expect(messages).toHaveLength(1);
+    expect(messages).toHaveLength(0);
   });
 
   it('upserts on duplicate id+chat_jid', () => {
@@ -244,6 +244,7 @@ describe('getMessagesSince', () => {
       content: 'second',
       timestamp: '2024-01-01T00:00:02.000Z',
     });
+    // Own bot message — excluded by is_from_me = 0
     storeMessage({
       id: 'm3',
       chat_jid: 'group@g.us',
@@ -251,6 +252,7 @@ describe('getMessagesSince', () => {
       sender_name: 'Bot',
       content: 'bot reply',
       timestamp: '2024-01-01T00:00:03.000Z',
+      is_from_me: true,
       is_bot_message: true,
     });
     store({
@@ -269,12 +271,12 @@ describe('getMessagesSince', () => {
       '2024-01-01T00:00:02.000Z',
       'Andy',
     );
-    // Should exclude m1, m2 (before/at timestamp), m3 (bot message)
+    // m1, m2 before/at timestamp excluded; m3 (is_from_me=1) excluded; m4 included
     expect(msgs).toHaveLength(1);
     expect(msgs[0].content).toBe('third');
   });
 
-  it('excludes bot messages via is_bot_message flag', () => {
+  it('excludes own bot messages via is_from_me flag', () => {
     const msgs = getMessagesSince(
       'group@g.us',
       '2024-01-01T00:00:00.000Z',
@@ -284,15 +286,13 @@ describe('getMessagesSince', () => {
     expect(botMsgs).toHaveLength(0);
   });
 
-  it('returns all non-bot messages when sinceTimestamp is empty', () => {
+  it('returns all non-own-bot messages when sinceTimestamp is empty', () => {
     const msgs = getMessagesSince('group@g.us', '', 'Andy');
-    // 3 user messages (bot message excluded)
+    // 3 user messages (own bot message excluded)
     expect(msgs).toHaveLength(3);
   });
 
   it('recovers cursor from last bot reply when lastAgentTimestamp is missing', () => {
-    // beforeEach already inserts m3 (bot reply at 00:00:03) and m4 (user at 00:00:04)
-    // Add more old history before the bot reply
     for (let i = 1; i <= 50; i++) {
       store({
         id: `history-${i}`,
@@ -304,7 +304,6 @@ describe('getMessagesSince', () => {
       });
     }
 
-    // New message after the bot reply (m3 at 00:00:03)
     store({
       id: 'new-1',
       chat_jid: 'group@g.us',
@@ -314,20 +313,17 @@ describe('getMessagesSince', () => {
       timestamp: '2024-01-02T00:00:00.000Z',
     });
 
-    // Recover cursor from the last bot message (m3 from beforeEach)
     const recovered = getLastBotMessageTimestamp('group@g.us', 'Andy');
     expect(recovered).toBe('2024-01-01T00:00:03.000Z');
 
-    // Using recovered cursor: only gets messages after the bot reply
     const msgs = getMessagesSince('group@g.us', recovered!, 'Andy', 10);
-    // m4 (third, 00:00:04) + new-1 — skips all 50 old messages and m1/m2
+    // m4 (third, 00:00:04) + new-1
     expect(msgs).toHaveLength(2);
     expect(msgs[0].content).toBe('third');
     expect(msgs[1].content).toBe('new message after bot reply');
   });
 
   it('caps messages to configured limit even with recovered cursor', () => {
-    // beforeEach inserts m3 (bot at 00:00:03). Add 30 messages after it.
     for (let i = 1; i <= 30; i++) {
       store({
         id: `pending-${i}`,
@@ -342,16 +338,13 @@ describe('getMessagesSince', () => {
     const recovered = getLastBotMessageTimestamp('group@g.us', 'Andy');
     expect(recovered).toBe('2024-01-01T00:00:03.000Z');
 
-    // With limit=10, only the 10 most recent are returned
     const msgs = getMessagesSince('group@g.us', recovered!, 'Andy', 10);
     expect(msgs).toHaveLength(10);
-    // Most recent 10: pending-21 through pending-30
     expect(msgs[0].content).toBe('pending message 21');
     expect(msgs[9].content).toBe('pending message 30');
   });
 
   it('returns last N messages when no bot reply and no cursor exist', () => {
-    // Use a fresh group with no bot messages
     storeChatMetadata('fresh@g.us', '2024-01-01T00:00:00.000Z');
     for (let i = 1; i <= 20; i++) {
       store({
@@ -367,7 +360,6 @@ describe('getMessagesSince', () => {
     const recovered = getLastBotMessageTimestamp('fresh@g.us', 'Andy');
     expect(recovered).toBeUndefined();
 
-    // No cursor → sinceTimestamp = '' but limit caps the result
     const msgs = getMessagesSince('fresh@g.us', '', 'Andy', 10);
     expect(msgs).toHaveLength(10);
 
@@ -377,7 +369,7 @@ describe('getMessagesSince', () => {
   });
 
   it('filters pre-migration bot messages via content prefix backstop', () => {
-    // Simulate a message written before migration: has prefix but is_bot_message = 0
+    // Simulate a message written before migration: has prefix but is_from_me = 0
     store({
       id: 'm5',
       chat_jid: 'group@g.us',
@@ -418,6 +410,7 @@ describe('getNewMessages', () => {
       content: 'g2 msg1',
       timestamp: '2024-01-01T00:00:02.000Z',
     });
+    // Own bot message — excluded by is_from_me = 0
     storeMessage({
       id: 'a3',
       chat_jid: 'group1@g.us',
@@ -425,7 +418,7 @@ describe('getNewMessages', () => {
       sender_name: 'User',
       content: 'bot reply',
       timestamp: '2024-01-01T00:00:03.000Z',
-      is_bot_message: true,
+      is_from_me: true,
     });
     store({
       id: 'a4',
@@ -443,7 +436,7 @@ describe('getNewMessages', () => {
       '2024-01-01T00:00:00.000Z',
       'Andy',
     );
-    // Excludes bot message, returns 3 user messages
+    // Excludes own bot message (is_from_me=1), returns 3 user messages
     expect(messages).toHaveLength(3);
     expect(newTimestamp).toBe('2024-01-01T00:00:04.000Z');
   });
@@ -454,7 +447,7 @@ describe('getNewMessages', () => {
       '2024-01-01T00:00:02.000Z',
       'Andy',
     );
-    // Only g1 msg2 (after ts, not bot)
+    // Only g1 msg2 (after ts, not own bot)
     expect(messages).toHaveLength(1);
     expect(messages[0].content).toBe('g1 msg2');
   });
@@ -587,9 +580,7 @@ describe('message query LIMIT', () => {
     expect(messages).toHaveLength(3);
     expect(messages[0].content).toBe('message 8');
     expect(messages[2].content).toBe('message 10');
-    // Chronological order preserved
     expect(messages[1].timestamp > messages[0].timestamp).toBe(true);
-    // newTimestamp reflects latest returned row
     expect(newTimestamp).toBe('2024-01-01T00:00:10.000Z');
   });
 

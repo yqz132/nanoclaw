@@ -50,13 +50,14 @@ export class DiscordChannel implements Channel {
     });
 
     this.client.on(Events.MessageCreate, async (message: Message) => {
-      // Ignore bot messages (including own)
-      if (message.author.bot) return;
-
       const channelId = message.channelId;
       const chatJid = `dc:${channelId}`;
       let content = message.content;
       const timestamp = message.createdAt.toISOString();
+      const isBot = message.author.bot;
+      const isFromMe = this.client?.user
+        ? message.author.id === this.client.user.id
+        : false;
       const senderName =
         message.member?.displayName ||
         message.author.displayName ||
@@ -164,7 +165,8 @@ export class DiscordChannel implements Channel {
         sender_name: senderName,
         content,
         timestamp,
-        is_from_me: false,
+        is_from_me: isFromMe,
+        is_bot_message: isBot,
       });
 
       logger.info(

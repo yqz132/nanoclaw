@@ -17,7 +17,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
-STORE_DB="$PROJECT_ROOT/store/messages.db"
+STORE_DB="${STORE_DIR:-$PROJECT_ROOT/store}/messages.db"
 SESSIONS_DIR="$PROJECT_ROOT/data/sessions"
 GROUPS_DIR="$PROJECT_ROOT/groups"
 
