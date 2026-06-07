@@ -96,19 +96,20 @@ export class DiscordChannel implements Channel {
         }
       }
 
-      // Handle attachments — store placeholders so the agent knows something was sent
+      // Handle attachments — include download URL so the agent can fetch the file
       if (message.attachments.size > 0) {
         const attachmentDescriptions = [...message.attachments.values()].map(
           (att) => {
             const contentType = att.contentType || '';
+            const url = att.url || '';
             if (contentType.startsWith('image/')) {
-              return `[Image: ${att.name || 'image'}]`;
+              return `[Image: ${att.name || 'image'}](${url})`;
             } else if (contentType.startsWith('video/')) {
-              return `[Video: ${att.name || 'video'}]`;
+              return `[Video: ${att.name || 'video'}](${url})`;
             } else if (contentType.startsWith('audio/')) {
-              return `[Audio: ${att.name || 'audio'}]`;
+              return `[Audio: ${att.name || 'audio'}](${url})`;
             } else {
-              return `[File: ${att.name || 'file'}]`;
+              return `[File: ${att.name || 'file'}](${url})`;
             }
           },
         );
