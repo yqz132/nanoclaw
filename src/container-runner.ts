@@ -6,7 +6,10 @@ import { ChildProcess, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
+import { fileURLToPath } from 'url';
+
 import {
+  ASSISTANT_NAME,
   CONTAINER_IMAGE,
   CONTAINER_MAX_OUTPUT_SIZE,
   CONTAINER_TIMEOUT,
@@ -14,9 +17,14 @@ import {
   GROUPS_DIR,
   IDLE_TIMEOUT,
   ONECLI_URL,
+  STORE_DIR,
   TIMEZONE,
 } from './config.js';
-import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
+import {
+  resolveGroupFolderPath,
+  resolveGroupIpcPath,
+  isValidGroupFolder,
+} from './group-folder.js';
 import { logger } from './logger.js';
 import {
   CONTAINER_RUNTIME_BIN,
@@ -63,7 +71,12 @@ function buildVolumeMounts(
   isMain: boolean,
 ): VolumeMount[] {
   const mounts: VolumeMount[] = [];
-  const projectRoot = process.cwd();
+  // Use the nanoclaw installation directory (where src/, dist/, container/ live),
+  // not process.cwd() which is the agent's data directory when running multi-instance.
+  const projectRoot = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    '..',
+  );
   const groupDir = resolveGroupFolderPath(group.folder);
 
   if (isMain) {
@@ -91,10 +104,9 @@ function buildVolumeMounts(
 
     // Main gets writable access to the store (SQLite DB) so it can
     // query and write to the database directly.
-    const storeDir = path.join(projectRoot, 'store');
     mounts.push({
-      hostPath: storeDir,
-      containerPath: '/workspace/project/store',
+      hostPath: STORE_DIR,
+      containerPath: '/workspace/store',
       readonly: false,
     });
 
@@ -132,6 +144,31 @@ function buildVolumeMounts(
         readonly: true,
       });
     }
+
+    // Cross-group visibility: mount other group folders read-only so
+    // agents can read shared project context without modifying it.
+    // Each sibling group appears at /workspace/groups/{folder}/.
+    try {
+      const siblingDirs = fs.readdirSync(GROUPS_DIR).filter((entry) => {
+        const fullPath = path.join(GROUPS_DIR, entry);
+        return (
+          fs.statSync(fullPath).isDirectory() &&
+          entry !== group.folder &&
+          entry !== 'global' &&
+          isValidGroupFolder(entry)
+        );
+      });
+      for (const sibling of siblingDirs) {
+        const siblingPath = path.join(GROUPS_DIR, sibling);
+        mounts.push({
+          hostPath: siblingPath,
+          containerPath: `/workspace/groups/${sibling}`,
+          readonly: true,
+        });
+      }
+    } catch {
+      // GROUPS_DIR may not exist yet — skip sibling mounts
+    }
   }
 
   // Per-group Claude sessions directory (isolated from other groups)
@@ -145,19 +182,36 @@ function buildVolumeMounts(
   fs.mkdirSync(groupSessionsDir, { recursive: true });
   const settingsFile = path.join(groupSessionsDir, 'settings.json');
   if (!fs.existsSync(settingsFile)) {
+    // Inherit env from main group's settings.json so API endpoint, model,
+    // and other agent-level config propagates to all groups automatically.
+    const mainFolder = ASSISTANT_NAME.toLowerCase();
+    const mainSettingsFile = path.join(
+      DATA_DIR,
+      'sessions',
+      mainFolder,
+      '.claude',
+      'settings.json',
+    );
+    let inheritedEnv: Record<string, string> = {};
+    if (mainFolder !== group.folder && fs.existsSync(mainSettingsFile)) {
+      try {
+        const mainSettings = JSON.parse(
+          fs.readFileSync(mainSettingsFile, 'utf8'),
+        );
+        inheritedEnv = mainSettings.env ?? {};
+      } catch {
+        // ignore parse errors — fall back to empty
+      }
+    }
     fs.writeFileSync(
       settingsFile,
       JSON.stringify(
         {
           env: {
-            // Enable agent swarms (subagent orchestration)
-            // https://code.claude.com/docs/en/agent-teams#orchestrate-teams-of-claude-code-sessions
+            ...inheritedEnv,
+            // Required NanoClaw runtime flags (always set, not inherited)
             CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
-            // Load CLAUDE.md from additional mounted directories
-            // https://code.claude.com/docs/en/memory#load-memory-from-additional-directories
             CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
-            // Enable Claude's memory feature (persists user preferences between sessions)
-            // https://code.claude.com/docs/en/memory#manage-auto-memory
             CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
           },
         },
@@ -168,7 +222,7 @@ function buildVolumeMounts(
   }
 
   // Sync skills from container/skills/ into each group's .claude/skills/
-  const skillsSrc = path.join(process.cwd(), 'container', 'skills');
+  const skillsSrc = path.join(projectRoot, 'container', 'skills');
   const skillsDst = path.join(groupSessionsDir, 'skills');
   if (fs.existsSync(skillsSrc)) {
     for (const skillDir of fs.readdirSync(skillsSrc)) {
@@ -307,10 +361,9 @@ export async function runContainerAgent(
   const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
-  // Main group uses the default OneCLI agent; others use their own agent.
-  const agentIdentifier = input.isMain
-    ? undefined
-    : group.folder.toLowerCase().replace(/_/g, '-');
+  // Agent identity is determined by which process is running, not by which
+  // group is being served — one agent can host sessions for multiple groups.
+  const agentIdentifier = ASSISTANT_NAME.toLowerCase();
   const containerArgs = await buildContainerArgs(
     mounts,
     containerName,
